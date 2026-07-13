@@ -55,6 +55,9 @@ class Settings:
     poll_seconds: int = field(default_factory=lambda: _int("POLL_SECONDS", 30))
     log_level: str = field(default_factory=lambda: _str("LOG_LEVEL", "INFO"))
 
+    telegram_bot_token: str = field(default_factory=lambda: _str("TELEGRAM_BOT_TOKEN", ""))
+    telegram_chat_id: str = field(default_factory=lambda: _str("TELEGRAM_CHAT_ID", ""))
+
     enable_live_orders: bool = field(
         default_factory=lambda: _str("ENABLE_LIVE_ORDERS", "false").lower() == "true"
     )

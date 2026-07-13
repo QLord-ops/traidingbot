@@ -56,7 +56,7 @@ class TestnetEngine:
     __test__ = False  # не собирать классом pytest (имя начинается с Test)
 
     def __init__(self, settings: Settings, client: BinanceFuturesClient,
-                 journal: Journal):
+                 journal: Journal, notifier=None):
         settings.validate()
         if settings.trading_mode != "testnet":
             raise EngineError("Engine запускается только в TRADING_MODE=testnet")
@@ -69,11 +69,35 @@ class TestnetEngine:
         self.settings = settings
         self.client = client
         self.journal = journal
+        self.notifier = notifier  # опциональный TelegramNotifier (duck typing: .send)
         self.rules: dict[str, SymbolRules] = {}
         self.status = EngineStatus()
+        self._seen_candles: set[str] = set()
+        self._adopted: set[str] = set()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+
+    def _event(self, level: str, message: str, notify: bool = True) -> None:
+        """Журналирует событие и (для значимых) шлёт уведомление владельцу."""
+        self.journal.log_event(level, message)
+        if notify and self.notifier is not None:
+            self.notifier.send(f"[{level}] {message}")
+
+    def status_text(self) -> str:
+        st = self.status
+        positions = ", ".join(
+            f"{p['symbol']} {p['amt']} (uPnL {p['unrealized']})" for p in st.positions
+        ) or "нет"
+        return (
+            f"Engine: {'работает' if st.running else 'остановлен'}\n"
+            f"Баланс: {st.balance_usdt:.2f} USDT\n"
+            f"Сделок сегодня: {st.trades_today}, PnL сегодня: {st.realized_pnl_today:+.2f}\n"
+            f"Дневная блокировка: {'ДА' if st.day_locked else 'нет'}\n"
+            f"Позиции: {positions}\n"
+            f"Последний цикл: {st.last_cycle_at or '—'}"
+            + (f"\nОшибка: {st.last_error}" if st.last_error else "")
+        )
 
     # --- подготовка -------------------------------------------------------
 
@@ -88,8 +112,8 @@ class TestnetEngine:
             self.rules[symbol] = parse_symbol_rules(info, symbol)
             self.client.change_margin_type(symbol, "ISOLATED")
             self.client.change_leverage(symbol, self.settings.leverage)
-        self.journal.log_event("INFO", "Engine подготовлен: isolated, leverage="
-                               f"{self.settings.leverage}, symbols={self.settings.symbols}")
+        self._event("INFO", "Engine подготовлен: isolated, leverage="
+                    f"{self.settings.leverage}, symbols={self.settings.symbols}")
 
     # --- reconciliation -----------------------------------------------------
 
@@ -105,23 +129,30 @@ class TestnetEngine:
                 o.get("type") in ("STOP_MARKET", "STOP") for o in algo_orders
             )
             if positions and not has_stop:
-                self.journal.log_event(
+                self._event(
                     "CRITICAL",
                     f"{symbol}: позиция без Stop Loss обнаружена при reconciliation — "
                     "аварийное закрытие",
                 )
                 self.emergency_close(symbol)
+                self._adopted.discard(symbol)
             elif not positions and algo_orders:
                 # осиротевшие защитные ордера без позиции
-                self.journal.log_event(
+                self._event(
                     "WARNING", f"{symbol}: осиротевшие algo-ордера без позиции — отмена"
                 )
                 for order in algo_orders:
                     self.client.cancel_algo_order(symbol, algo_id=order.get("algoId"))
+                self._adopted.discard(symbol)
             elif positions:
-                self.journal.log_event(
-                    "INFO", f"{symbol}: найдена защищённая позиция, принимаем сопровождение"
-                )
+                # уведомляем один раз, а не каждый цикл reconcile
+                if symbol not in self._adopted:
+                    self._adopted.add(symbol)
+                    self._event(
+                        "INFO", f"{symbol}: найдена защищённая позиция, принимаем сопровождение"
+                    )
+            else:
+                self._adopted.discard(symbol)
         # закрытые на бирже, но открытые в журнале сделки
         for trade in self.journal.open_trades():
             symbol = trade["symbol"]
@@ -132,9 +163,9 @@ class TestnetEngine:
             if open_amt == 0:
                 pnl = self._realized_pnl_since(symbol, trade["created_at"])
                 self.journal.close_trade(trade["client_order_id"], "CLOSED_ON_EXCHANGE", pnl)
-                self.journal.log_event(
+                self._event(
                     "INFO", f"{symbol}: сделка {trade['client_order_id']} закрыта биржей, "
-                    f"PnL={pnl}"
+                    f"PnL={pnl:+.2f} USDT"
                 )
 
     def _realized_pnl_since(self, symbol: str, created_at: str) -> float:
@@ -189,14 +220,19 @@ class TestnetEngine:
 
         candle_ms = int(pd_ts_to_ms(signal.candle_time))
         client_order_id = f"tb-{symbol}-{candle_ms}"
-        if self.journal.has_trade(client_order_id):
+        if client_order_id in self._seen_candles or self.journal.has_trade(client_order_id):
             return "DUPLICATE_SKIPPED"  # идемпотентность: свеча уже отработана
+        # Каждая сигнальная свеча обрабатывается один раз, каким бы ни был исход:
+        # без этого заблокированный лимитами сигнал спамил бы журнал каждый цикл.
+        self._seen_candles.add(client_order_id)
+        if len(self._seen_candles) > 2000:
+            self._seen_candles.clear()
 
         balance = self.client.balance_usdt()
         self.status.balance_usdt = balance
         ok, why = self._daily_limits_ok(balance)
         if not ok:
-            self.journal.log_event("INFO", f"{symbol}: вход пропущен — {why}")
+            self._event("INFO", f"{symbol}: вход пропущен — {why}")
             return "LIMITS"
         if self._has_open_position():
             return "POSITION_EXISTS"
@@ -225,7 +261,7 @@ class TestnetEngine:
             entry_order = self._order_status_or_none(symbol, client_order_id)
             if entry_order is None:
                 self.journal.close_trade(client_order_id, "ENTRY_FAILED", 0.0)
-                self.journal.log_event("ERROR", f"{symbol}: вход не исполнен: {exc}")
+                self._event("ERROR", f"{symbol}: вход не исполнен: {exc}")
                 return "ENTRY_FAILED"
 
         # --- защитные ордера: без подтверждённого SL позиция не живёт ---------
@@ -235,7 +271,7 @@ class TestnetEngine:
                 close_position=True, client_algo_id=f"{client_order_id}-sl",
             )
         except BinanceAPIError as exc:
-            self.journal.log_event(
+            self._event(
                 "CRITICAL", f"{symbol}: SL не подтверждён ({exc}) — аварийное закрытие"
             )
             self.emergency_close(symbol)
@@ -248,14 +284,14 @@ class TestnetEngine:
                 close_position=True, client_algo_id=f"{client_order_id}-tp",
             )
         except BinanceAPIError as exc:
-            self.journal.log_event(
+            self._event(
                 "CRITICAL", f"{symbol}: TP не подтверждён ({exc}) — аварийное закрытие"
             )
             self.emergency_close(symbol)
             self.journal.close_trade(client_order_id, "EMERGENCY_CLOSED", None)
             return "EMERGENCY_CLOSED"
 
-        self.journal.log_event(
+        self._event(
             "INFO",
             f"{symbol}: открыта позиция {signal.side.value} qty={plan.quantity} "
             f"SL={stop_price} TP={tp_price} (id={client_order_id})",
@@ -291,7 +327,7 @@ class TestnetEngine:
                 symbol, side, abs(amt), reduce_only=True,
                 client_order_id=f"tb-emergency-{symbol}-{int(time.time() * 1000)}",
             )
-        self.journal.log_event("WARNING", f"{symbol}: emergency close выполнен")
+        self._event("WARNING", f"{symbol}: emergency close выполнен")
 
     def emergency_close_all(self) -> None:
         for symbol in self.settings.symbols:
@@ -328,7 +364,7 @@ class TestnetEngine:
             self.status.started_at = datetime.now(timezone.utc).isoformat()
             self._thread = threading.Thread(target=self._loop, daemon=True)
             self._thread.start()
-            self.journal.log_event("INFO", "Engine запущен")
+            self._event("INFO", "Engine запущен")
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -338,8 +374,11 @@ class TestnetEngine:
             except LiveTradingBlocked:
                 raise
             except Exception as exc:  # цикл не должен умирать от единичной ошибки
-                self.status.last_error = str(exc)
-                self.journal.log_event("ERROR", f"Цикл engine: {exc}")
+                message = str(exc)
+                # одинаковая повторяющаяся ошибка не спамит журнал и Telegram
+                if message != self.status.last_error:
+                    self._event("ERROR", f"Цикл engine: {message}")
+                self.status.last_error = message
                 log.exception("Ошибка цикла engine")
             self._stop.wait(self.settings.poll_seconds)
         self.status.running = False
@@ -349,7 +388,7 @@ class TestnetEngine:
         if self._thread:
             self._thread.join(timeout=30)
         self.status.running = False
-        self.journal.log_event("INFO", "Engine остановлен")
+        self._event("INFO", "Engine остановлен")
 
 
 def pd_ts_to_ms(ts: str) -> int:

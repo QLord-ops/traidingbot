@@ -17,9 +17,10 @@ from .binance_client import BinanceFuturesClient, BinanceAPIError
 from .config import Settings
 from .data import get_klines, get_funding_rates
 from .journal import Journal
+from .telegram_notify import TelegramCommandListener, TelegramNotifier
 from .testnet_engine import TestnetEngine, EngineError
 
-app = FastAPI(title="Intraday Bot Control Panel", version="0.4")
+app = FastAPI(title="Intraday Bot Control Panel", version="0.5")
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 PROFILES_PATH = DATA_DIR / "profiles.json"
@@ -28,6 +29,7 @@ RUNS_PATH = DATA_DIR / "runs_history.json"
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}USDT$")
 
 _engine: TestnetEngine | None = None
+_listener: TelegramCommandListener | None = None
 _engine_lock = threading.Lock()
 _files_lock = threading.Lock()
 
@@ -500,6 +502,17 @@ onclick="return confirm('Закрыть все позиции и отменит�
 <button class='primary' type='submit' {disabled}>Запустить Testnet engine</button>
 </form></div>"""
 
+    tg_configured = bool(settings.telegram_bot_token and settings.telegram_chat_id)
+    tg_html = (
+        "<div class='card'>Telegram: <span class='good'>настроен</span> — уведомления "
+        "о сделках и командах <code>/stop</code>, <code>/status</code> активны при "
+        "работающем engine.</div>"
+        if tg_configured else
+        "<div class='card muted'>Telegram не настроен (опционально): задайте "
+        "TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID в .env, чтобы получать уведомления "
+        "и иметь аварийную команду /stop из мессенджера.</div>"
+    )
+
     event_rows = "".join(
         f"<tr><td>{esc(e['created_at'])}</td><td>{esc(e['level'])}</td>"
         f"<td style='text-align:left'>{esc(e['message'])}</td></tr>"
@@ -512,14 +525,31 @@ onclick="return confirm('Закрыть все позиции и отменит�
 заблокирован на уровне кода: engine отказывается стартовать с боевым API,
 а <code>ENABLE_LIVE_ORDERS=true</code> приводит к ошибке конфигурации.</div>
 {status_html}
+{tg_html}
 <div class='card'><h2>Журнал событий</h2><div style='overflow:auto'>
 <table><tr><th>Время (UTC)</th><th>Уровень</th><th>Сообщение</th></tr>{event_rows}</table></div></div>
 """, "Testnet")
 
 
+def _emergency_stop_all() -> None:
+    """Общий путь аварийной остановки для веб-кнопки и Telegram-команды."""
+    engine = get_engine()
+    if engine:
+        engine.stop()
+        engine.emergency_close_all()
+    _stop_listener()
+
+
+def _stop_listener() -> None:
+    global _listener
+    if _listener:
+        _listener.stop()
+        _listener = None
+
+
 @app.post("/testnet/start")
 def testnet_start():
-    global _engine
+    global _engine, _listener
     with _engine_lock:
         if _engine and _engine.status.running:
             return RedirectResponse("/testnet", status_code=303)
@@ -531,8 +561,19 @@ def testnet_start():
             client = BinanceFuturesClient(
                 api_key=settings.api_key, api_secret=settings.api_secret, testnet=True
             )
-            _engine = TestnetEngine(settings, client, Journal())
+            notifier = TelegramNotifier(settings.telegram_bot_token,
+                                        settings.telegram_chat_id)
+            _engine = TestnetEngine(settings, client, Journal(), notifier=notifier)
             _engine.start()
+            if notifier.enabled:
+                _stop_listener()
+                _listener = TelegramCommandListener(
+                    settings.telegram_bot_token, settings.telegram_chat_id,
+                    on_stop=_emergency_stop_all,
+                    on_status=lambda: (_engine.status_text() if _engine
+                                       else "Engine не запущен"),
+                )
+                _listener.start()
         except (EngineError, ValueError, BinanceAPIError) as exc:
             return page(f"<h1>Не удалось запустить engine</h1>"
                         f"<div class='card crit'>{esc(exc)}</div>"
@@ -545,15 +586,13 @@ def testnet_stop():
     engine = get_engine()
     if engine:
         engine.stop()
+    _stop_listener()
     return RedirectResponse("/testnet", status_code=303)
 
 
 @app.post("/testnet/emergency")
 def testnet_emergency():
-    engine = get_engine()
-    if engine:
-        engine.stop()
-        engine.emergency_close_all()
+    _emergency_stop_all()
     return RedirectResponse("/testnet", status_code=303)
 
 
