@@ -1,0 +1,22 @@
+# Secrets
+.env
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Runtime data and logs
+data/*.db
+data/*.csv
+data/*.json
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
