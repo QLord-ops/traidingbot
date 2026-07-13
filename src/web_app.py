@@ -17,6 +17,7 @@ from .binance_client import BinanceFuturesClient, BinanceAPIError
 from .config import Settings
 from .data import get_klines, get_funding_rates
 from .journal import Journal
+from .stats import compute_trade_stats
 from .telegram_notify import TelegramCommandListener, TelegramNotifier
 from .testnet_engine import TestnetEngine, EngineError
 
@@ -56,7 +57,7 @@ table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:8px;bo
 .warn{{border-left:4px solid #f0b90b;padding-left:12px}}.crit{{border-left:4px solid #dc2626;padding-left:12px}}a{{color:#f0b90b}}
 nav a{{margin-right:16px}}svg{{width:100%;height:auto;display:block}}
 </style></head><body><main>
-<nav><a href='/'>Backtest</a><a href='/compare'>Сравнение прогонов</a><a href='/testnet'>Testnet</a></nav>
+<nav><a href='/'>Backtest</a><a href='/compare'>Сравнение прогонов</a><a href='/testnet'>Testnet</a><a href='/testnet/stats'>Статистика обкатки</a></nav>
 {body}</main></body></html>""")
 
 
@@ -545,6 +546,72 @@ def _stop_listener() -> None:
     if _listener:
         _listener.stop()
         _listener = None
+
+
+@app.get("/testnet/stats", response_class=HTMLResponse)
+def testnet_stats():
+    """Статистика обкатки: по ней решается судьба стратегии после 100–200 сделок."""
+    journal = Journal()
+    closed = journal.closed_trades()
+    stats = compute_trade_stats(closed)
+    target = 100
+    progress = min(stats.trades / target * 100, 100)
+
+    if stats.trades == 0:
+        body_stats = ("<div class='card'>Закрытых Testnet-сделок пока нет. "
+                      "Запустите engine на вкладке «Testnet» и вернитесь сюда.</div>")
+    else:
+        pf = "∞" if stats.profit_factor == float("inf") else f"{stats.profit_factor:.2f}"
+        cls = "good" if stats.total_pnl > 0 else "bad"
+        symbol_rows = "".join(
+            f"<tr><td>{esc(sym)}</td><td>{v['trades']}</td>"
+            f"<td>{v['wins'] / v['trades'] * 100:.0f}%</td>"
+            f"<td class='{ 'good' if v['pnl'] > 0 else 'bad' }'>{v['pnl']:+.2f}</td></tr>"
+            for sym, v in sorted(stats.by_symbol.items())
+        )
+        trade_rows = "".join(
+            f"<tr><td>{esc(t['created_at'][:16])}</td><td>{esc(t['symbol'])}</td>"
+            f"<td>{esc(t['side'])}</td><td>{esc(t['status'])}</td>"
+            f"<td class='{ 'good' if (t['realized_pnl'] or 0) > 0 else 'bad' }'>"
+            f"{(t['realized_pnl'] or 0):+.2f}</td></tr>"
+            for t in closed[:30]
+        )
+        body_stats = f"""
+<div class='grid'>
+<div class='card'><div class='muted'>Закрытых сделок</div><div class='metric'>{stats.trades}</div></div>
+<div class='card'><div class='muted'>Суммарный PnL</div><div class='metric {cls}'>{stats.total_pnl:+.2f} USDT</div></div>
+<div class='card'><div class='muted'>Win rate</div><div class='metric'>{stats.win_rate:.1f}%</div></div>
+<div class='card'><div class='muted'>Средний R</div><div class='metric'>{stats.avg_r:+.2f}R</div></div>
+<div class='card'><div class='muted'>Expectancy</div><div class='metric'>{stats.expectancy:+.2f} USDT</div></div>
+<div class='card'><div class='muted'>Profit Factor</div><div class='metric'>{pf}</div></div>
+<div class='card'><div class='muted'>Серия убытков (макс)</div><div class='metric'>{stats.max_consecutive_losses}</div></div>
+</div>
+<div class='card'><h2>По инструментам</h2>
+<table><tr><th>Символ</th><th>Сделок</th><th>Win rate</th><th>PnL</th></tr>{symbol_rows}</table></div>
+<div class='card'><h2>Последние сделки</h2><div style='overflow:auto'>
+<table><tr><th>Время</th><th>Символ</th><th>Side</th><th>Статус</th><th>PnL</th></tr>{trade_rows}</table></div></div>"""
+
+    return page(f"""
+<h1>Статистика Testnet-обкатки</h1>
+<div class='card'><b>Прогресс до первой контрольной точки (100 сделок):</b>
+<div style='background:#0e1528;border-radius:8px;height:18px;margin-top:8px'>
+<div style='background:#f0b90b;height:18px;border-radius:8px;width:{progress:.0f}%'></div></div>
+<p class='muted'>{stats.trades} из {target}. Решение о реальном режиме обсуждается
+не раньше 100–200 закрытых сделок.</p></div>
+{body_stats}
+<div class='card warn'><h2>С чем сравнивать (backtest 3 года, после издержек)</h2>
+<table>
+<tr><th>Метрика</th><th>BTCUSDT</th><th>ETHUSDT</th></tr>
+<tr><td>Win rate</td><td>37.5%</td><td>36.5%</td></tr>
+<tr><td>Средний R</td><td>+0.30</td><td>+0.23</td></tr>
+<tr><td>Profit Factor</td><td>1.70</td><td>1.56</td></tr>
+<tr><td>Макс. серия убытков</td><td>6</td><td>9</td></tr>
+</table>
+<p class='muted'>Если после ~100 сделок средний R систематически ниже нуля или серия
+убытков сильно длиннее backtest — гипотеза не подтверждается, и наращивать риск
+нельзя. Win rate ~35% — норма для трендовой стратегии: прибыль делают редкие
+длинные сделки.</p></div>
+""", "Статистика обкатки")
 
 
 @app.post("/testnet/start")

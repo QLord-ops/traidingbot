@@ -122,6 +122,17 @@ class Journal:
             cols = [c[0] for c in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 
+    def closed_trades(self, limit: int | None = None) -> list[dict]:
+        """Сделки с зафиксированным результатом, новые первыми."""
+        query = ("SELECT * FROM engine_trades WHERE realized_pnl IS NOT NULL "
+                 "ORDER BY id DESC")
+        if limit:
+            query += f" LIMIT {int(limit)}"
+        with self._lock:
+            cur = self.conn.execute(query)
+            cols = [c[0] for c in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
     def trades_on_day(self, day: str) -> int:
         with self._lock:
             row = self.conn.execute(
