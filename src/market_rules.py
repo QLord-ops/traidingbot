@@ -37,14 +37,22 @@ def parse_symbol_rules(exchange_info: dict, symbol: str) -> SymbolRules:
         raise ValueError(f"Символ {symbol} не найден в exchangeInfo")
     filters = {f["filterType"]: f for f in item.get("filters", [])}
     price = filters.get("PRICE_FILTER", {})
-    lot = filters.get("MARKET_LOT_SIZE") or filters.get("LOT_SIZE", {})
+    market_lot = filters.get("MARKET_LOT_SIZE", {})
+    limit_lot = filters.get("LOT_SIZE", {})
     notional = filters.get("MIN_NOTIONAL") or filters.get("NOTIONAL", {})
     min_notional = notional.get("notional", notional.get("minNotional", 0))
+
+    # У части символов MARKET_LOT_SIZE содержит нулевые значения — берём
+    # каждое поле из market-фильтра, а при нуле — из LOT_SIZE.
+    def lot_value(key: str) -> float:
+        value = float(market_lot.get(key, 0) or 0)
+        return value if value > 0 else float(limit_lot.get(key, 0) or 0)
+
     return SymbolRules(
         symbol=symbol,
         tick_size=float(price.get("tickSize", 0)),
-        step_size=float(lot.get("stepSize", 0)),
-        min_qty=float(lot.get("minQty", 0)),
-        max_qty=float(lot.get("maxQty", 0)),
+        step_size=lot_value("stepSize"),
+        min_qty=lot_value("minQty"),
+        max_qty=lot_value("maxQty"),
         min_notional=float(min_notional or 0),
     )

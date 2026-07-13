@@ -49,6 +49,8 @@ def main() -> None:
         settings.trading_mode, ",".join(settings.symbols)
     )
     client.ping()
+    if settings.api_key and settings.api_secret:
+        client.sync_time()
 
     while True:
         try:

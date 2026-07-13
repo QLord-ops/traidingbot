@@ -10,10 +10,8 @@ __pycache__/
 .venv/
 venv/
 
-# Runtime data and logs
-data/*.db
-data/*.csv
-data/*.json
+# Runtime data, cache and logs (никогда не коммитить сгенерированное)
+data/
 *.log
 
 # IDE / OS
