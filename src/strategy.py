@@ -130,14 +130,54 @@ def protective_levels(side: Side, entry: float, prev_low: float, prev_high: floa
     return stop, tp
 
 
+def donchian_side(cur, trend_row, settings: Settings) -> Side:
+    """Trend following: пробой Donchian-канала по направлению старшего тренда.
+
+    LONG: закрытие выше максимума предыдущих N свечей И цена старшего ТФ выше
+    EMA тренда. SHORT — зеркально. Никаких объёмных/скоринговых фильтров:
+    гипотеза следует классическим правилам time-series momentum.
+    """
+    required = [cur["donchian_high"], cur["donchian_low"], cur["atr"],
+                trend_row["close"], trend_row["ema_trend"]]
+    if any(_is_bad(v) for v in required):
+        return Side.HOLD
+    if cur["close"] > cur["donchian_high"] and trend_row["close"] > trend_row["ema_trend"]:
+        return Side.LONG
+    if cur["close"] < cur["donchian_low"] and trend_row["close"] < trend_row["ema_trend"]:
+        return Side.SHORT
+    return Side.HOLD
+
+
+def chandelier_stop(side: Side, reference: float, atr: float, mult: float) -> float:
+    """Трейлинг-стоп Chandelier: reference (экстремум/закрытие) ± mult·ATR."""
+    if side == Side.LONG:
+        return reference - mult * atr
+    return reference + mult * atr
+
+
+def _add_donchian(df: pd.DataFrame, period: int) -> pd.DataFrame:
+    # shift(1): канал по предыдущим N свечам, текущая не подглядывает в себя
+    df = df.copy()
+    df["donchian_high"] = df["high"].rolling(period).max().shift(1)
+    df["donchian_low"] = df["low"].rolling(period).min().shift(1)
+    return df
+
+
 def evaluate(symbol: str, signal_df: pd.DataFrame, trend_df: pd.DataFrame,
              settings: Settings, last_closed: bool = False) -> Signal:
-    """Оценка сигнала по последней закрытой свече.
+    """Диспетчер live-оценки сигнала по режиму STRATEGY_MODE.
 
     last_closed=False (по умолчанию) — данные с live API, где последняя строка
     является формирующейся свечой и отбрасывается. last_closed=True — данные,
     в которых все свечи уже закрыты (кэш, CSV).
     """
+    if settings.strategy_mode == "donchian":
+        return _evaluate_donchian(symbol, signal_df, trend_df, settings, last_closed)
+    return _evaluate_score(symbol, signal_df, trend_df, settings, last_closed)
+
+
+def _evaluate_score(symbol: str, signal_df: pd.DataFrame, trend_df: pd.DataFrame,
+                    settings: Settings, last_closed: bool) -> Signal:
     s = add_indicators(
         signal_df, settings.ema_fast, settings.ema_slow,
         settings.ema_trend, settings.atr_period, settings.volume_period
@@ -175,3 +215,38 @@ def evaluate(symbol: str, signal_df: pd.DataFrame, trend_df: pd.DataFrame,
     value = score.long_score if side == Side.LONG else score.short_score
     return Signal(symbol, side, entry, stop, tp, value,
                   "; ".join(reasons), candle_time)
+
+
+def _evaluate_donchian(symbol: str, signal_df: pd.DataFrame, trend_df: pd.DataFrame,
+                       settings: Settings, last_closed: bool) -> Signal:
+    s = _add_donchian(
+        add_indicators(signal_df, settings.ema_fast, settings.ema_slow,
+                       settings.ema_trend, settings.atr_period, settings.volume_period),
+        settings.donchian_period,
+    )
+    t = add_indicators(
+        trend_df, settings.ema_fast, settings.ema_slow,
+        settings.ema_trend, settings.atr_period, settings.volume_period
+    )
+    offset = 1 if last_closed else 2
+    if len(s) < offset or len(t) < offset:
+        return Signal(symbol, Side.HOLD, None, None, None, 0,
+                      "недостаточно данных", "")
+    cur = s.iloc[-offset]
+    trend = t.iloc[-offset]
+    candle_time = str(cur["close_time"])
+    trend_row = {"close": trend["close"], "ema_trend": trend["ema_trend"]}
+
+    side = donchian_side(cur, trend_row, settings)
+    if side == Side.HOLD:
+        return Signal(symbol, Side.HOLD, None, None, None, 0,
+                      "нет пробоя Donchian по тренду", candle_time)
+
+    entry = float(cur["close"])
+    atr = float(cur["atr"])
+    # начальный стоп mult·ATR от входа; TP нет — выход только по трейлинг-стопу
+    stop = chandelier_stop(side, entry, atr, settings.trail_atr_mult)
+    reason = ("пробой верхней границы Donchian по восходящему тренду"
+              if side == Side.LONG else
+              "пробой нижней границы Donchian по нисходящему тренду")
+    return Signal(symbol, side, entry, stop, None, 0, reason, candle_time)

@@ -7,7 +7,7 @@ import pandas as pd
 
 from .config import Settings
 from .indicators import add_indicators
-from .strategy import Side, score_candle, protective_levels
+from .strategy import Side, score_candle, protective_levels, donchian_side
 
 
 @dataclass
@@ -89,24 +89,6 @@ def _merge_trend(s: pd.DataFrame, t: pd.DataFrame) -> pd.DataFrame:
         on="close_time",
         direction="backward",
     )
-
-
-def _donchian_side(cur, trend_row, settings: Settings) -> Side:
-    """Trend following: пробой Donchian-канала по направлению старшего тренда.
-
-    LONG: закрытие выше максимума предыдущих N свечей И цена старшего ТФ выше
-    EMA тренда. SHORT — зеркально. Никаких объёмных/скоринговых фильтров:
-    гипотеза следует классическим правилам time-series momentum.
-    """
-    required = [cur["donchian_high"], cur["donchian_low"], cur["atr"],
-                trend_row["close"], trend_row["ema_trend"]]
-    if any(pd.isna(v) for v in required):
-        return Side.HOLD
-    if cur["close"] > cur["donchian_high"] and trend_row["close"] > trend_row["ema_trend"]:
-        return Side.LONG
-    if cur["close"] < cur["donchian_low"] and trend_row["close"] < trend_row["ema_trend"]:
-        return Side.SHORT
-    return Side.HOLD
 
 
 def _to_utc(ts) -> pd.Timestamp:
@@ -292,7 +274,7 @@ def run_backtest(
         trend_row = {k: cur[v] for k, v in trend_cols.items()}
         trail_mult = None
         if settings.strategy_mode == "donchian":
-            side = _donchian_side(cur, trend_row, settings)
+            side = donchian_side(cur, trend_row, settings)
             trail_mult = settings.trail_atr_mult
         else:
             score = score_candle(cur, prev, trend_row, settings)

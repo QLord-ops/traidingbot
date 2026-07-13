@@ -8,10 +8,11 @@ from datetime import datetime, timezone
 
 from .binance_client import BinanceFuturesClient, BinanceAPIError
 from .config import Settings, MAX_LEVERAGE
+from .indicators import add_indicators
 from .journal import Journal
 from .market_rules import SymbolRules, parse_symbol_rules, round_to_tick
 from .risk import calculate_position
-from .strategy import Side, evaluate
+from .strategy import Side, chandelier_stop, evaluate
 
 log = logging.getLogger(__name__)
 
@@ -66,11 +67,6 @@ class TestnetEngine:
             )
         if settings.leverage > MAX_LEVERAGE:
             raise EngineError(f"Плечо выше {MAX_LEVERAGE}x запрещено")
-        if settings.strategy_mode != "score":
-            raise EngineError(
-                "STRATEGY_MODE=donchian пока поддерживается только в backtest: "
-                "трейлинг-стоп требует обновления ордеров на бирже (план v0.6)"
-            )
         self.settings = settings
         self.client = client
         self.journal = journal
@@ -248,7 +244,8 @@ class TestnetEngine:
             self.settings.leverage, rules=rules,
         )
         stop_price = round_to_tick(signal.stop, rules.tick_size)
-        tp_price = round_to_tick(signal.take_profit, rules.tick_size)
+        tp_price = (round_to_tick(signal.take_profit, rules.tick_size)
+                    if signal.take_profit is not None else None)
         order_side = "BUY" if signal.side == Side.LONG else "SELL"
         close_side = "SELL" if signal.side == Side.LONG else "BUY"
 
@@ -283,25 +280,110 @@ class TestnetEngine:
             self.journal.close_trade(client_order_id, "EMERGENCY_CLOSED", None)
             return "EMERGENCY_CLOSED"
 
-        try:
-            self.client.new_algo_order(
-                symbol, close_side, "TAKE_PROFIT_MARKET", tp_price,
-                close_position=True, client_algo_id=f"{client_order_id}-tp",
-            )
-        except BinanceAPIError as exc:
-            self._event(
-                "CRITICAL", f"{symbol}: TP не подтверждён ({exc}) — аварийное закрытие"
-            )
-            self.emergency_close(symbol)
-            self.journal.close_trade(client_order_id, "EMERGENCY_CLOSED", None)
-            return "EMERGENCY_CLOSED"
+        # TP только для скоринговой стратегии; donchian выходит по трейлинг-стопу
+        if tp_price is not None:
+            try:
+                self.client.new_algo_order(
+                    symbol, close_side, "TAKE_PROFIT_MARKET", tp_price,
+                    close_position=True, client_algo_id=f"{client_order_id}-tp",
+                )
+            except BinanceAPIError as exc:
+                self._event(
+                    "CRITICAL", f"{symbol}: TP не подтверждён ({exc}) — аварийное закрытие"
+                )
+                self.emergency_close(symbol)
+                self.journal.close_trade(client_order_id, "EMERGENCY_CLOSED", None)
+                return "EMERGENCY_CLOSED"
 
         self._event(
             "INFO",
             f"{symbol}: открыта позиция {signal.side.value} qty={plan.quantity} "
-            f"SL={stop_price} TP={tp_price} (id={client_order_id})",
+            f"SL={stop_price} TP={tp_price if tp_price is not None else 'трейлинг'} "
+            f"(id={client_order_id})",
         )
         return "OPENED"
+
+    # --- трейлинг-стоп (donchian) ------------------------------------------
+
+    def manage_trailing_stops(self) -> None:
+        """Подтягивает защитный STOP_MARKET за ценой (Chandelier) для donchian.
+
+        Modify условных ордеров Binance не поддерживает, поэтому стоп двигается
+        заменой: сначала ставится новый (более тесный) стоп, затем отменяется
+        старый — позиция ни на миг не остаётся без защиты. Стоп только тесним,
+        никогда не ослабляем.
+        """
+        if self.settings.strategy_mode != "donchian":
+            return
+        for symbol in self.settings.symbols:
+            try:
+                self._trail_symbol(symbol)
+            except BinanceAPIError as exc:
+                self._event("ERROR", f"{symbol}: трейлинг-стоп не обновлён: {exc}",
+                            notify=False)
+
+    def _trail_symbol(self, symbol: str) -> None:
+        positions = [
+            p for p in self.client.position_risk(symbol)
+            if abs(float(p.get("positionAmt", 0) or 0)) > 0
+        ]
+        if not positions:
+            return
+        amt = float(positions[0].get("positionAmt", 0))
+        side = Side.LONG if amt > 0 else Side.SHORT
+        close_side = "SELL" if side == Side.LONG else "BUY"
+
+        stops = [o for o in self.client.open_algo_orders(symbol)
+                 if o.get("type") == "STOP_MARKET"]
+        if not stops:
+            return  # без защиты — этим занимается reconcile, не трейлинг
+        current = stops[0]
+        current_trigger = float(current.get("triggerPrice", 0) or 0)
+
+        df = self.client.klines(symbol, self.settings.signal_interval,
+                                self.settings.atr_period + 5)
+        s = add_indicators(df, self.settings.ema_fast, self.settings.ema_slow,
+                           self.settings.ema_trend, self.settings.atr_period,
+                           self.settings.volume_period)
+        cur = s.iloc[-2]  # последняя закрытая свеча
+        atr = float(cur["atr"])
+        ref = float(cur["close"])
+        rules = self.rules[symbol]
+        new_stop = round_to_tick(
+            chandelier_stop(side, ref, atr, self.settings.trail_atr_mult),
+            rules.tick_size,
+        )
+        # тесним только в благоприятную сторону
+        improves = new_stop > current_trigger if side == Side.LONG else new_stop < current_trigger
+        if not improves:
+            return
+
+        new_id = f"tb-{symbol}-trail-{int(time.time() * 1000)}"
+        try:
+            self.client.new_algo_order(
+                symbol, close_side, "STOP_MARKET", new_stop,
+                close_position=True, client_algo_id=new_id,
+            )
+        except BinanceAPIError as exc:
+            # -2021: цена уже дошла до нового стопа — закрываем позицию немедленно
+            if getattr(exc, "code", None) == -2021:
+                self._event("WARNING",
+                            f"{symbol}: цена достигла трейлинг-уровня — закрытие")
+                self.emergency_close(symbol)
+            else:
+                self._event("ERROR",
+                            f"{symbol}: не удалось поставить новый стоп ({exc}) — "
+                            "старый стоп сохранён", notify=False)
+            return
+        # новый стоп принят — теперь безопасно снять старый
+        try:
+            self.client.cancel_algo_order(symbol, algo_id=current.get("algoId"))
+        except BinanceAPIError as exc:
+            log.warning("Не удалось снять старый стоп %s: %s",
+                        current.get("algoId"), exc)
+        self._event("INFO",
+                    f"{symbol}: трейлинг-стоп подтянут {current_trigger} → {new_stop}",
+                    notify=False)
 
     def _order_status_or_none(self, symbol: str, client_order_id: str) -> dict | None:
         try:
@@ -342,6 +424,7 @@ class TestnetEngine:
 
     def run_cycle(self) -> None:
         self.reconcile()
+        self.manage_trailing_stops()
         for symbol in self.settings.symbols:
             result = self.process_symbol(symbol)
             log.info("%s: %s", symbol, result)

@@ -20,7 +20,7 @@ from .journal import Journal
 from .telegram_notify import TelegramCommandListener, TelegramNotifier
 from .testnet_engine import TestnetEngine, EngineError
 
-app = FastAPI(title="Intraday Bot Control Panel", version="0.5")
+app = FastAPI(title="Intraday Bot Control Panel", version="0.6")
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 PROFILES_PATH = DATA_DIR / "profiles.json"
@@ -228,7 +228,7 @@ def health():
 def home():
     profiles = load_profiles()
     return page(f"""
-<h1>Binance Intraday Bot — панель управления v0.4</h1>
+<h1>Binance Intraday Bot — панель управления v0.6</h1>
 <div class='card warn'><b>Безопасный режим:</b> панель выполняет backtest по публичным данным
 и управляет Testnet (Demo Trading). Реальные ордера жёстко заблокированы.</div>
 {form_html({}, profiles)}

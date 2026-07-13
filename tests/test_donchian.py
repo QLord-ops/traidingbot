@@ -4,7 +4,7 @@ import pytest
 
 from src.backtest import BacktestParams, run_backtest
 from src.config import Settings
-from src.testnet_engine import EngineError, TestnetEngine
+from src.testnet_engine import TestnetEngine
 from tests.conftest import make_df
 
 NO_COSTS = BacktestParams(taker_fee_rate=0.0, maker_fee_rate=0.0,
@@ -76,13 +76,14 @@ def test_flat_market_no_trades():
     assert result.trades == 0
 
 
-def test_engine_rejects_donchian_mode(tmp_path):
+def test_engine_accepts_donchian_mode(tmp_path):
     from src.journal import Journal
     from tests.test_engine import FakeClient, make_testnet_settings
     settings = dataclasses.replace(make_testnet_settings(),
                                    strategy_mode="donchian")
-    with pytest.raises(EngineError, match="donchian"):
-        TestnetEngine(settings, FakeClient(), Journal(str(tmp_path / "t.db")))
+    # donchian теперь поддерживается engine (трейлинг-стоп на бирже)
+    engine = TestnetEngine(settings, FakeClient(), Journal(str(tmp_path / "t.db")))
+    assert engine.settings.strategy_mode == "donchian"
 
 
 def test_config_validates_donchian_params():
