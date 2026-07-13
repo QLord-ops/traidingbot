@@ -66,6 +66,11 @@ class TestnetEngine:
             )
         if settings.leverage > MAX_LEVERAGE:
             raise EngineError(f"Плечо выше {MAX_LEVERAGE}x запрещено")
+        if settings.strategy_mode != "score":
+            raise EngineError(
+                "STRATEGY_MODE=donchian пока поддерживается только в backtest: "
+                "трейлинг-стоп требует обновления ордеров на бирже (план v0.6)"
+            )
         self.settings = settings
         self.client = client
         self.journal = journal

@@ -44,6 +44,12 @@ class Settings:
     leverage: int = field(default_factory=lambda: _int("LEVERAGE", 3))
     reward_risk: float = field(default_factory=lambda: _float("REWARD_RISK", 1.8))
 
+    # score — интрадей-скоринг (исходная гипотеза); donchian — трендовый
+    # breakout на старшем ТФ с трейлинг-стопом (пока только backtest)
+    strategy_mode: str = field(default_factory=lambda: _str("STRATEGY_MODE", "score").lower())
+    donchian_period: int = field(default_factory=lambda: _int("DONCHIAN_PERIOD", 48))
+    trail_atr_mult: float = field(default_factory=lambda: _float("TRAIL_ATR_MULT", 3.0))
+
     ema_fast: int = field(default_factory=lambda: _int("EMA_FAST", 20))
     ema_slow: int = field(default_factory=lambda: _int("EMA_SLOW", 50))
     ema_trend: int = field(default_factory=lambda: _int("EMA_TREND", 200))
@@ -90,3 +96,9 @@ class Settings:
             raise ValueError("ATR_MIN_PCT не может быть отрицательным")
         if self.volume_multiplier <= 0:
             raise ValueError("VOLUME_MULTIPLIER должен быть положительным")
+        if self.strategy_mode not in {"score", "donchian"}:
+            raise ValueError("STRATEGY_MODE должен быть score или donchian")
+        if self.donchian_period < 10:
+            raise ValueError("DONCHIAN_PERIOD должен быть >= 10")
+        if self.trail_atr_mult <= 0:
+            raise ValueError("TRAIL_ATR_MULT должен быть положительным")

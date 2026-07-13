@@ -18,7 +18,7 @@ class Trade:
     entry: float
     exit: float
     stop: float
-    take_profit: float
+    take_profit: float | None  # None у трендовых сделок с трейлинг-стопом
     qty: float
     pnl_usdt: float
     r_multiple: float
@@ -91,6 +91,24 @@ def _merge_trend(s: pd.DataFrame, t: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _donchian_side(cur, trend_row, settings: Settings) -> Side:
+    """Trend following: пробой Donchian-канала по направлению старшего тренда.
+
+    LONG: закрытие выше максимума предыдущих N свечей И цена старшего ТФ выше
+    EMA тренда. SHORT — зеркально. Никаких объёмных/скоринговых фильтров:
+    гипотеза следует классическим правилам time-series momentum.
+    """
+    required = [cur["donchian_high"], cur["donchian_low"], cur["atr"],
+                trend_row["close"], trend_row["ema_trend"]]
+    if any(pd.isna(v) for v in required):
+        return Side.HOLD
+    if cur["close"] > cur["donchian_high"] and trend_row["close"] > trend_row["ema_trend"]:
+        return Side.LONG
+    if cur["close"] < cur["donchian_low"] and trend_row["close"] < trend_row["ema_trend"]:
+        return Side.SHORT
+    return Side.HOLD
+
+
 def _to_utc(ts) -> pd.Timestamp:
     ts = pd.Timestamp(ts)
     return ts.tz_localize("UTC") if ts.tz is None else ts.tz_convert("UTC")
@@ -143,6 +161,10 @@ def run_backtest(
     p = params or BacktestParams()
     s = _prepare(signal_df.copy(), settings)
     t = _prepare(trend_df.copy(), settings)
+    if settings.strategy_mode == "donchian":
+        # shift(1): канал по предыдущим N свечам, текущая не подглядывает в себя
+        s["donchian_high"] = s["high"].rolling(settings.donchian_period).max().shift(1)
+        s["donchian_low"] = s["low"].rolling(settings.donchian_period).min().shift(1)
     s = _merge_trend(s, t)
     trend_cols = {"close": "trend_close", "ema_fast": "trend_ema_fast",
                   "ema_slow": "trend_ema_slow", "ema_trend": "trend_ema_trend"}
@@ -182,19 +204,20 @@ def run_backtest(
             exit_price = None
             exit_is_market = True
             reason = None
+            has_tp = position["tp"] is not None
             if side == "LONG":
                 if cur["open"] <= position["stop"]:
                     exit_price, reason = float(cur["open"]), "STOP_GAP"
                 elif cur["low"] <= position["stop"]:
                     exit_price, reason = position["stop"], "STOP"
-                elif cur["high"] >= position["tp"]:
+                elif has_tp and cur["high"] >= position["tp"]:
                     exit_price, reason, exit_is_market = position["tp"], "TAKE_PROFIT", False
             else:
                 if cur["open"] >= position["stop"]:
                     exit_price, reason = float(cur["open"]), "STOP_GAP"
                 elif cur["high"] >= position["stop"]:
                     exit_price, reason = position["stop"], "STOP"
-                elif cur["low"] <= position["tp"]:
+                elif has_tp and cur["low"] <= position["tp"]:
                     exit_price, reason, exit_is_market = position["tp"], "TAKE_PROFIT", False
 
             fcost = funding.cost(position["last_funding_check"], cur["close_time"],
@@ -234,6 +257,15 @@ def run_backtest(
                 position = None
                 if balance <= day_start_balance * (1 - settings.daily_loss_limit):
                     day_locked = True
+            elif position.get("trail_mult") and not pd.isna(cur["atr"]):
+                # Chandelier: стоп подтягивается за ценой и никогда не отступает
+                k = position["trail_mult"]
+                if side == "LONG":
+                    position["stop"] = max(position["stop"],
+                                           float(cur["close"]) - k * float(cur["atr"]))
+                else:
+                    position["stop"] = min(position["stop"],
+                                           float(cur["close"]) + k * float(cur["atr"]))
 
         # --- equity (баланс + нереализованный PnL) --------------------------
         unrealized = 0.0
@@ -258,8 +290,13 @@ def run_backtest(
             continue
 
         trend_row = {k: cur[v] for k, v in trend_cols.items()}
-        score = score_candle(cur, prev, trend_row, settings)
-        side = score.side()
+        trail_mult = None
+        if settings.strategy_mode == "donchian":
+            side = _donchian_side(cur, trend_row, settings)
+            trail_mult = settings.trail_atr_mult
+        else:
+            score = score_candle(cur, prev, trend_row, settings)
+            side = score.side()
         if side == Side.HOLD:
             continue
 
@@ -267,10 +304,15 @@ def run_backtest(
         sign = 1 if side == Side.LONG else -1
         entry = raw_entry * (1 + sign * p.slippage_rate)
         entry_slip = abs(entry - raw_entry)
-        stop, tp = protective_levels(
-            side, entry, float(prev["low"]), float(prev["high"]),
-            float(cur["atr"]), settings.reward_risk,
-        )
+        if settings.strategy_mode == "donchian":
+            # начальный стоп на k*ATR, без TP: выход только по трейлинг-стопу
+            stop = entry - sign * settings.trail_atr_mult * float(cur["atr"])
+            tp = None
+        else:
+            stop, tp = protective_levels(
+                side, entry, float(prev["low"]), float(prev["high"]),
+                float(cur["atr"]), settings.reward_risk,
+            )
         risk_per_unit = (entry - stop) * sign
         if risk_per_unit <= 0:
             continue
@@ -292,6 +334,7 @@ def run_backtest(
             "entry_slip": entry_slip * qty, "margin": margin,
             "risk_usdt": risk_budget, "funding": 0.0,
             "last_funding_check": s.iloc[i + 1]["open_time"],
+            "trail_mult": trail_mult,
         }
         trades_today += 1
 

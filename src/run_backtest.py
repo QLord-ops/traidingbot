@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 from pathlib import Path
 
@@ -25,9 +26,28 @@ def main() -> None:
                         help="Разбить период на N окон")
     parser.add_argument("--signal-csv")
     parser.add_argument("--trend-csv")
+    parser.add_argument("--strategy", choices=["score", "donchian"], default=None,
+                        help="Переопределить STRATEGY_MODE")
+    parser.add_argument("--signal-interval", default=None, help="напр. 4h")
+    parser.add_argument("--trend-interval", default=None, help="напр. 1d")
+    parser.add_argument("--donchian-period", type=int, default=None)
+    parser.add_argument("--trail-atr", type=float, default=None)
     args = parser.parse_args()
 
     settings = Settings()
+    overrides = {}
+    if args.strategy:
+        overrides["strategy_mode"] = args.strategy
+    if args.signal_interval:
+        overrides["signal_interval"] = args.signal_interval
+    if args.trend_interval:
+        overrides["trend_interval"] = args.trend_interval
+    if args.donchian_period:
+        overrides["donchian_period"] = args.donchian_period
+    if args.trail_atr:
+        overrides["trail_atr_mult"] = args.trail_atr
+    if overrides:
+        settings = dataclasses.replace(settings, **overrides)
     settings.validate()
     params = BacktestParams(
         initial_balance=args.balance,
