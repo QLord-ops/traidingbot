@@ -1,0 +1,14 @@
+services:
+  web:
+    build: .
+    container_name: traidingbot-web
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      WEB_HOST: 0.0.0.0
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
