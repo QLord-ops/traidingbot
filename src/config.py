@@ -76,14 +76,27 @@ class Settings:
             )
         if self.trading_mode not in {"dry_run", "testnet"}:
             raise ValueError("Допускается только TRADING_MODE=dry_run или testnet")
-        if not 0 < self.risk_per_trade <= 0.01:
-            raise ValueError("RISK_PER_TRADE должен быть > 0 и <= 1%")
-        if not 0 < self.daily_loss_limit <= 0.05:
-            raise ValueError("DAILY_LOSS_LIMIT должен быть > 0 и <= 5%")
+        # На демо-счёте (testnet) разрешены агрессивные эксперименты по явному
+        # решению владельца. Для любых будущих live-обсуждений действуют
+        # строгие лимиты из HANDOFF_RU.md — их ослабление demo-режимом не
+        # распространяется дальше demo.
+        aggressive = self.trading_mode == "testnet"
+        max_risk = 0.05 if aggressive else 0.01
+        max_daily = 0.20 if aggressive else 0.05
+        max_trades = 15 if aggressive else 10
+        if not 0 < self.risk_per_trade <= max_risk:
+            raise ValueError(f"RISK_PER_TRADE должен быть > 0 и <= {max_risk * 100:.0f}%")
+        if not 0 < self.daily_loss_limit <= max_daily:
+            raise ValueError(f"DAILY_LOSS_LIMIT должен быть > 0 и <= {max_daily * 100:.0f}%")
+        if self.daily_loss_limit <= self.risk_per_trade:
+            raise ValueError(
+                "DAILY_LOSS_LIMIT должен быть больше RISK_PER_TRADE, иначе "
+                "первая же убыточная сделка блокирует день"
+            )
         if not 1 <= self.leverage <= MAX_LEVERAGE:
             raise ValueError(f"LEVERAGE должен быть от 1 до {MAX_LEVERAGE}")
-        if not 1 <= self.max_trades_per_day <= 10:
-            raise ValueError("MAX_TRADES_PER_DAY должен быть от 1 до 10")
+        if not 1 <= self.max_trades_per_day <= max_trades:
+            raise ValueError(f"MAX_TRADES_PER_DAY должен быть от 1 до {max_trades}")
         if self.max_open_positions != 1:
             raise ValueError("Пока допускается только одна открытая позиция")
         if self.reward_risk <= 0:
