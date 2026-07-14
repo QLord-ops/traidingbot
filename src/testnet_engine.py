@@ -425,6 +425,7 @@ class TestnetEngine:
     def run_cycle(self) -> None:
         self.reconcile()
         self.manage_trailing_stops()
+        self.status.balance_usdt = self.client.balance_usdt()
         for symbol in self.settings.symbols:
             result = self.process_symbol(symbol)
             log.info("%s: %s", symbol, result)
