@@ -64,6 +64,12 @@ class Settings:
     telegram_bot_token: str = field(default_factory=lambda: _str("TELEGRAM_BOT_TOKEN", ""))
     telegram_chat_id: str = field(default_factory=lambda: _str("TELEGRAM_CHAT_ID", ""))
 
+    # Эталон backtest для контроля соответствия live-результатов
+    # (обновлять после каждой ревалидации стратегии)
+    backtest_avg_r: float = field(default_factory=lambda: _float("BACKTEST_AVG_R", 0.233))
+    backtest_std_r: float = field(default_factory=lambda: _float("BACKTEST_STD_R", 1.73))
+    conformity_min_trades: int = field(default_factory=lambda: _int("CONFORMITY_MIN_TRADES", 20))
+
     # Календарный фильтр: не открывать позиции вокруг CPI/FOMC
     macro_filter: bool = field(
         default_factory=lambda: _str("MACRO_FILTER", "true").lower() == "true"

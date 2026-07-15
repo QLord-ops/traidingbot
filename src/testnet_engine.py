@@ -39,6 +39,8 @@ class EngineStatus:
     balance_usdt: float = 0.0
     positions: list[dict] = field(default_factory=list)
     candidates: list[dict] = field(default_factory=list)
+    risk_scale: float = 1.0
+    conformity: str = ""
 
 
 def _utc_day() -> str:
@@ -77,6 +79,7 @@ class TestnetEngine:
         self.status = EngineStatus()
         self._seen_candles: set[str] = set()
         self._adopted: set[str] = set()
+        self.risk_scale = 1.0  # авто-снижение при расхождении live с backtest
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -257,7 +260,8 @@ class TestnetEngine:
 
         rules = self.rules[symbol]
         plan = calculate_position(
-            balance, self.settings.risk_per_trade, signal.entry, signal.stop,
+            balance, self.settings.risk_per_trade * self.risk_scale,
+            signal.entry, signal.stop,
             self.settings.leverage, rules=rules,
         )
         stop_price = round_to_tick(signal.stop, rules.tick_size)
@@ -282,6 +286,17 @@ class TestnetEngine:
                 self.journal.close_trade(client_order_id, "ENTRY_FAILED", 0.0)
                 self._event("ERROR", f"{symbol}: вход не исполнен: {exc}")
                 return "ENTRY_FAILED"
+
+        # замер качества исполнения: сигнальная цена vs фактический fill
+        try:
+            fill_price = float(entry_order.get("avgPrice") or 0)
+            if fill_price > 0 and signal.entry:
+                self.journal.record_execution(
+                    symbol, client_order_id, signal.side.value,
+                    signal.entry, fill_price,
+                )
+        except (TypeError, ValueError) as exc:
+            log.warning("Не удалось записать исполнение %s: %s", client_order_id, exc)
 
         # --- защитные ордера: без подтверждённого SL позиция не живёт ---------
         try:
@@ -439,9 +454,45 @@ class TestnetEngine:
 
     # --- жизненный цикл ---------------------------------------------------------
 
+    def check_conformity(self) -> None:
+        """Сверка live-результатов с эталоном backtest.
+
+        Если после N сделок средний R ниже нижней границы одностороннего
+        95%-доверительного интервала эталона — стратегия ведёт себя хуже
+        своей истории: риск автоматически урезается вдвое до разбора.
+        """
+        import math as _math
+        closed = self.journal.closed_trades()
+        from .stats import compute_trade_stats
+        stats = compute_trade_stats(closed)
+        n = stats.trades
+        if n < self.settings.conformity_min_trades:
+            self.status.conformity = (
+                f"наблюдение: {n}/{self.settings.conformity_min_trades} сделок")
+            return
+        band_low = (self.settings.backtest_avg_r
+                    - 1.645 * self.settings.backtest_std_r / _math.sqrt(n))
+        self.status.conformity = (
+            f"{n} сделок, avg R {stats.avg_r:+.3f} (граница {band_low:+.3f})")
+        if stats.avg_r < band_low and self.risk_scale == 1.0:
+            self.risk_scale = 0.5
+            self.status.risk_scale = 0.5
+            self._event(
+                "CRITICAL",
+                f"Live-результат ({stats.avg_r:+.3f}R за {n} сделок) ниже "
+                f"доверительной границы backtest ({band_low:+.3f}R). "
+                "Риск автоматически снижен вдвое до ручного разбора.",
+            )
+        elif stats.avg_r >= band_low and self.risk_scale < 1.0:
+            self.risk_scale = 1.0
+            self.status.risk_scale = 1.0
+            self._event("INFO", "Live-результат вернулся в доверительный "
+                        "интервал — риск восстановлен.")
+
     def run_cycle(self) -> None:
         self.reconcile()
         self.manage_trailing_stops()
+        self.check_conformity()
         self.status.balance_usdt = self.client.balance_usdt()
         # Сначала оцениваем ВСЕ символы, затем пробуем входы в порядке убывания
         # силы сигнала: при нескольких одновременных пробоях единственный слот

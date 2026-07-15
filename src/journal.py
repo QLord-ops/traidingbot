@@ -49,6 +49,16 @@ class Journal:
                     level TEXT NOT NULL,
                     message TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS executions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    symbol TEXT NOT NULL,
+                    client_order_id TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    signal_price REAL NOT NULL,
+                    fill_price REAL NOT NULL,
+                    slip_bps REAL NOT NULL
+                );
             """)
             self.conn.commit()
 
@@ -147,6 +157,30 @@ class Journal:
                 "WHERE day = ? AND realized_pnl IS NOT NULL", (day,)
             ).fetchone()
         return float(row[0])
+
+    def record_execution(self, symbol: str, client_order_id: str, side: str,
+                         signal_price: float, fill_price: float) -> None:
+        """Замер качества исполнения: сигнальная цена против фактического fill.
+
+        slip_bps > 0 — исполнение хуже сигнала (для любой стороны).
+        """
+        sign = 1 if side == "LONG" else -1
+        slip_bps = sign * (fill_price / signal_price - 1) * 10_000
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO executions "
+                "(symbol, client_order_id, side, signal_price, fill_price, slip_bps) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (symbol, client_order_id, side, signal_price, fill_price, slip_bps),
+            )
+            self.conn.commit()
+
+    def execution_stats(self) -> dict:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*), AVG(slip_bps), MAX(slip_bps) FROM executions"
+            ).fetchone()
+        return {"count": int(row[0]), "avg_bps": row[1], "worst_bps": row[2]}
 
     def log_event(self, level: str, message: str) -> None:
         with self._lock:

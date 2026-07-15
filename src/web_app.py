@@ -479,7 +479,9 @@ def testnet_page():
 <p class='muted'>Запущен: {esc(st.started_at or '—')} · Последний цикл: {esc(st.last_cycle_at or '—')}</p>
 <p>Баланс: <b>{st.balance_usdt:.2f} USDT</b> · Сделок сегодня: {st.trades_today} ·
 PnL сегодня: {st.realized_pnl_today:+.2f} USDT ·
-Дневная блокировка: {"<span class='bad'>ДА</span>" if st.day_locked else "нет"}</p>
+Дневная блокировка: {"<span class='bad'>ДА</span>" if st.day_locked else "нет"} ·
+Риск: {"<span class='bad'>снижен ×" + str(st.risk_scale) + "</span>" if st.risk_scale < 1 else "штатный"}</p>
+<p class='muted'>Контроль соответствия backtest: {esc(st.conformity or "—")}</p>
 {f"<p class='bad'>Последняя ошибка: {esc(st.last_error)}</p>" if st.last_error else ""}
 <table><tr><th>Символ</th><th>Кол-во</th><th>Вход</th><th>Unrealized PnL</th></tr>{positions}</table>
 <p class='muted'>Сигналы этого цикла (по убыванию силы тренда): {
@@ -595,8 +597,24 @@ def testnet_stats():
 <div class='card'><h2>Последние сделки</h2><div style='overflow:auto'>
 <table><tr><th>Время</th><th>Символ</th><th>Side</th><th>Статус</th><th>PnL</th></tr>{trade_rows}</table></div></div>"""
 
+    exec_stats = journal.execution_stats()
+    if exec_stats["count"]:
+        slippage_html = (
+            f"<div class='card'><h2>Качество исполнения</h2>"
+            f"<p>Замеров: {exec_stats['count']} · среднее проскальзывание "
+            f"<b>{exec_stats['avg_bps']:+.1f} б.п.</b> (модель backtest: 2 б.п.) · "
+            f"худшее: {exec_stats['worst_bps']:+.1f} б.п.</p>"
+            f"<p class='muted'>Если среднее устойчиво превышает модельные 2 б.п., "
+            f"поправку нужно внести в BacktestParams.slippage_rate и пересчитать "
+            f"ожидания стратегии.</p></div>"
+        )
+    else:
+        slippage_html = ("<div class='card muted'>Замеров исполнения пока нет — "
+                         "появятся с первыми сделками.</div>")
+
     return page(f"""
 <h1>Статистика Testnet-обкатки</h1>
+{slippage_html}
 <div class='card'><b>Прогресс до первой контрольной точки (100 сделок):</b>
 <div style='background:#0e1528;border-radius:8px;height:18px;margin-top:8px'>
 <div style='background:#f0b90b;height:18px;border-radius:8px;width:{progress:.0f}%'></div></div>
