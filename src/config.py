@@ -64,6 +64,13 @@ class Settings:
     telegram_bot_token: str = field(default_factory=lambda: _str("TELEGRAM_BOT_TOKEN", ""))
     telegram_chat_id: str = field(default_factory=lambda: _str("TELEGRAM_CHAT_ID", ""))
 
+    # Календарный фильтр: не открывать позиции вокруг CPI/FOMC
+    macro_filter: bool = field(
+        default_factory=lambda: _str("MACRO_FILTER", "true").lower() == "true"
+    )
+    macro_block_before_h: float = field(default_factory=lambda: _float("MACRO_BLOCK_BEFORE_H", 8))
+    macro_block_after_h: float = field(default_factory=lambda: _float("MACRO_BLOCK_AFTER_H", 2))
+
     enable_live_orders: bool = field(
         default_factory=lambda: _str("ENABLE_LIVE_ORDERS", "false").lower() == "true"
     )
@@ -115,3 +122,5 @@ class Settings:
             raise ValueError("DONCHIAN_PERIOD должен быть >= 10")
         if self.trail_atr_mult <= 0:
             raise ValueError("TRAIL_ATR_MULT должен быть положительным")
+        if not 0 <= self.macro_block_before_h <= 48 or not 0 <= self.macro_block_after_h <= 48:
+            raise ValueError("Окна MACRO_BLOCK_*_H должны быть в диапазоне 0–48 часов")

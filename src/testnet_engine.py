@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from . import macro_calendar
 from .binance_client import BinanceFuturesClient, BinanceAPIError
 from .config import Settings, MAX_LEVERAGE
 from .indicators import add_indicators
@@ -235,6 +236,15 @@ class TestnetEngine:
         if not ok:
             self._event("INFO", f"{symbol}: вход пропущен — {why}")
             return "LIMITS"
+        if self.settings.macro_filter:
+            event = macro_calendar.in_blackout(
+                datetime.now(timezone.utc),
+                self.settings.macro_block_before_h,
+                self.settings.macro_block_after_h,
+            )
+            if event:
+                self._event("INFO", f"{symbol}: вход пропущен — макро-событие {event}")
+                return "MACRO_BLACKOUT"
         if self._has_open_position():
             return "POSITION_EXISTS"
 

@@ -5,6 +5,7 @@ import math
 
 import pandas as pd
 
+from . import macro_calendar
 from .config import Settings
 from .indicators import add_indicators
 from .strategy import Side, score_candle, protective_levels, donchian_side
@@ -58,6 +59,7 @@ class BacktestResult:
     max_consecutive_wins: int
     skipped_by_daily_loss: int
     skipped_by_trade_limit: int
+    skipped_by_macro: int = 0
     monthly_returns: dict[str, float] = field(default_factory=dict)
     equity_curve: list[tuple[str, float]] = field(default_factory=list)
     drawdown_curve: list[tuple[str, float]] = field(default_factory=list)
@@ -167,6 +169,7 @@ def run_backtest(
     day_locked = False
     skipped_by_daily_loss = 0
     skipped_by_trade_limit = 0
+    skipped_by_macro = 0
 
     start = max(settings.ema_trend, settings.volume_period, settings.atr_period) + 2
     for i in range(start, len(s) - 1):
@@ -282,6 +285,12 @@ def run_backtest(
         if side == Side.HOLD:
             continue
 
+        if settings.macro_filter and macro_calendar.in_blackout(
+                s.iloc[i + 1]["open_time"],
+                settings.macro_block_before_h, settings.macro_block_after_h):
+            skipped_by_macro += 1
+            continue
+
         raw_entry = float(s.iloc[i + 1]["open"])
         sign = 1 if side == Side.LONG else -1
         entry = raw_entry * (1 + sign * p.slippage_rate)
@@ -322,13 +331,14 @@ def run_backtest(
 
     return _build_result(p, balance, trades, fees_total, slippage_total, funding_total,
                          equity_times, equity_values,
-                         skipped_by_daily_loss, skipped_by_trade_limit)
+                         skipped_by_daily_loss, skipped_by_trade_limit, skipped_by_macro)
 
 
 def _build_result(p: BacktestParams, balance: float, trades: list[Trade],
                   fees_total: float, slippage_total: float, funding_total: float,
                   equity_times: list[str], equity_values: list[float],
-                  skipped_by_daily_loss: int, skipped_by_trade_limit: int) -> BacktestResult:
+                  skipped_by_daily_loss: int, skipped_by_trade_limit: int,
+                  skipped_by_macro: int = 0) -> BacktestResult:
     wins = sum(t.pnl_usdt > 0 for t in trades)
     losses = sum(t.pnl_usdt <= 0 for t in trades)
     gross_profit = sum(max(t.pnl_usdt, 0) for t in trades)
@@ -383,6 +393,7 @@ def _build_result(p: BacktestParams, balance: float, trades: list[Trade],
         max_consecutive_wins=max_consec_wins,
         skipped_by_daily_loss=skipped_by_daily_loss,
         skipped_by_trade_limit=skipped_by_trade_limit,
+        skipped_by_macro=skipped_by_macro,
         monthly_returns=monthly,
         equity_curve=list(zip(equity_times, equity_values)),
         drawdown_curve=drawdown_curve,
