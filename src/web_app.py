@@ -482,6 +482,10 @@ PnL сегодня: {st.realized_pnl_today:+.2f} USDT ·
 Дневная блокировка: {"<span class='bad'>ДА</span>" if st.day_locked else "нет"}</p>
 {f"<p class='bad'>Последняя ошибка: {esc(st.last_error)}</p>" if st.last_error else ""}
 <table><tr><th>Символ</th><th>Кол-во</th><th>Вход</th><th>Unrealized PnL</th></tr>{positions}</table>
+<p class='muted'>Сигналы этого цикла (по убыванию силы тренда): {
+    esc(", ".join(f"{c['symbol']} {c['side']} ({c['strength']})"
+                  for c in st.candidates)) or "нет"
+}</p>
 <form method='post' action='/testnet/stop' style='margin-top:12px'>
 <button class='secondary' type='submit'>Остановить</button>
 <button class='danger' formaction='/testnet/emergency' type='submit'

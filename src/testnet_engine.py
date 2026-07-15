@@ -38,6 +38,7 @@ class EngineStatus:
     realized_pnl_today: float = 0.0
     balance_usdt: float = 0.0
     positions: list[dict] = field(default_factory=list)
+    candidates: list[dict] = field(default_factory=list)
 
 
 def _utc_day() -> str:
@@ -209,14 +210,20 @@ class TestnetEngine:
 
     # --- исполнение -----------------------------------------------------------
 
-    def process_symbol(self, symbol: str) -> str:
-        """Один шаг: оценить сигнал и, если можно, открыть защищённую позицию."""
+    def fetch_signal(self, symbol: str):
+        """Оценка сигнала по свежим свечам (без исполнения)."""
         signal_df = self.client.klines(symbol, self.settings.signal_interval,
                                        self.settings.kline_limit)
         trend_df = self.client.klines(symbol, self.settings.trend_interval,
                                       self.settings.kline_limit)
         signal = evaluate(symbol, signal_df, trend_df, self.settings)
         self.journal.save_signal(signal)
+        return signal
+
+    def process_symbol(self, symbol: str, signal=None) -> str:
+        """Один шаг: оценить сигнал и, если можно, открыть защищённую позицию."""
+        if signal is None:
+            signal = self.fetch_signal(symbol)
         if signal.side == Side.HOLD:
             return "HOLD"
 
@@ -436,8 +443,21 @@ class TestnetEngine:
         self.reconcile()
         self.manage_trailing_stops()
         self.status.balance_usdt = self.client.balance_usdt()
-        for symbol in self.settings.symbols:
-            result = self.process_symbol(symbol)
+        # Сначала оцениваем ВСЕ символы, затем пробуем входы в порядке убывания
+        # силы сигнала: при нескольких одновременных пробоях единственный слот
+        # позиции достаётся сильнейшему тренду (проверено портфельным backtest).
+        signals = {symbol: self.fetch_signal(symbol)
+                   for symbol in self.settings.symbols}
+        self.status.candidates = [
+            {"symbol": s.symbol, "side": s.side.value,
+             "strength": round(s.strength, 4)}
+            for s in sorted(signals.values(), key=lambda x: -x.strength)
+            if s.side != Side.HOLD
+        ]
+        ordered = sorted(self.settings.symbols,
+                         key=lambda sym: -signals[sym].strength)
+        for symbol in ordered:
+            result = self.process_symbol(symbol, signal=signals[symbol])
             log.info("%s: %s", symbol, result)
         self.status.positions = [
             {

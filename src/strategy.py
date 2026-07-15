@@ -28,6 +28,8 @@ class Signal:
     score: int
     reason: str
     candle_time: str
+    # сила сигнала для выбора лучшего из одновременных (0 = не ранжируется)
+    strength: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -246,7 +248,11 @@ def _evaluate_donchian(symbol: str, signal_df: pd.DataFrame, trend_df: pd.DataFr
     atr = float(cur["atr"])
     # начальный стоп mult·ATR от входа; TP нет — выход только по трейлинг-стопу
     stop = chandelier_stop(side, entry, atr, settings.trail_atr_mult)
+    # сила тренда старшего ТФ — ключ ранжирования одновременных сигналов
+    # (проверено портфельным backtest: см. STRATEGY_RESEARCH_RU.md ч.8)
+    strength = abs(float(trend["close"]) / float(trend["ema_trend"]) - 1)
     reason = ("пробой верхней границы Donchian по восходящему тренду"
               if side == Side.LONG else
               "пробой нижней границы Donchian по нисходящему тренду")
-    return Signal(symbol, side, entry, stop, None, 0, reason, candle_time)
+    return Signal(symbol, side, entry, stop, None, 0, reason, candle_time,
+                  strength=strength)
